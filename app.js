@@ -69,6 +69,7 @@ const DEFAULT_SLOTS = [
   { type: "level", id: "heat_seat_r", level: 0 },
   { type: "action", command: "heat_wheel_on", label: "Подогрев руля" },
   { type: "car", command: "open_trunk", label: "Открыть багажник" },
+  { type: "action", command: "SPLIT_RUN", label: "Разделение экрана" },
   { type: "empty" }
 ];
 
@@ -90,6 +91,9 @@ const ACTION_LABELS = {
   GO_TO_GU: "Показать на головном устройстве",
   GO_TO_PP: "Показать на приборной панели",
   VIEW_ALL_MESSAGE: "Сообщения с телефона",
+  SPLIT_RUN: "Разделение экрана",
+  RUN_APP_MORE: "Дополнительные приложения",
+  RUN_SPICH_FOCUS: "Голосовой фокус",
   OPEN_TRUNK: "Открыть багажник",
   CLOSE_TRUNK: "Закрыть багажник",
   OPEN_FUEL_TANK: "Открыть лючок зарядки",
@@ -194,6 +198,7 @@ function commandIcon(command) {
   if (/home/i.test(command)) return "⌂";
   if (/back/i.test(command)) return "←";
   if (/app|menu/i.test(command)) return "▦";
+  if (/split|toggle.*(gu|pp|cpp)/i.test(command)) return "▥";
   if (/message/i.test(command)) return "◫";
   return "↗";
 }
@@ -358,6 +363,7 @@ function pickerItems() {
   const recommendedCommands = new Set([
     "heat_wheel_on", "heat_windshield_on", "heat_rearwindow_on", "Recirculation_On",
     "OPEN_SHTORKA", "CLOSE_SHTORKA", "RUN_FUN_CAR", "RUN_START_APP_MENU",
+    "SPLIT_RUN", "RUN_APP_MORE", "TOGGLE_GU_PP", "TOGGLE_GU_PP_CPP", "TOGGLE_CPP_PP",
     "OPEN_TRUNK", "OPEN_FUEL_TANK", "OPEN_GLOVE_BOX", "CLOSE_CENTRAL_LOCK"
   ]);
   return [
