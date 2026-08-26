@@ -3,6 +3,9 @@ const SLOT_COUNT = 12;
 const STORAGE_KEY = "generic_exlantix_slots_v1";
 const WEATHER_STORAGE_KEY = "generic_exlantix_weather_v1";
 const WEATHER_REFRESH_MS = 30 * 60 * 1000;
+const CAR_STATE_POLL_MS = 1_500;
+const COMMAND_WATCHDOG_MS = 2_500;
+const CAR_STATE_REQUEST_NAME = "all";
 
 const FALLBACK_ACTIONS = [
   "GO_TO_PP", "RUN_BLACK", "OPEN_SHTORKA", "CLOSE_SHTORKA", "VIBOR_VODITEL",
@@ -36,6 +39,15 @@ const LEVEL_GROUPS = [
   { id: "vent_zad_seat_l", label: "Вентиляция сзади слева", detail: "Заднее левое сиденье", icon: "❄", tone: "cool", off: "vent_zad_seat_l_0" },
   { id: "vent_zad_seat_r", label: "Вентиляция сзади справа", detail: "Заднее правое сиденье", icon: "❄", tone: "cool", off: "vent_zad_seat_r_off" }
 ];
+
+const ACTION_STATE_COMMANDS = {
+  heat_wheel_on: { key: "rulHeat", value: true },
+  heat_wheel_off: { key: "rulHeat", value: false },
+  heat_windshield_on: { key: "lobHeat", value: true },
+  heat_windshield_off: { key: "lobHeat", value: false },
+  heat_rearwindow_on: { key: "zadHeat", value: true },
+  heat_rearwindow_off: { key: "zadHeat", value: false }
+};
 
 const CAR_ACTIONS = [
   ["open_fuel_tank", "Открыть лючок зарядки"],
@@ -113,7 +125,16 @@ const state = {
   pickerSlot: null,
   pickerTab: "recommended",
   query: "",
-  toastTimer: null
+  toastTimer: null,
+  requestSequence: 0,
+  stateRequestPending: false,
+  stateRequestId: null,
+  stateRequestTimer: null,
+  commandQueue: [],
+  commandInFlight: null,
+  optimisticLevels: Object.create(null),
+  actionStates: Object.create(null),
+  optimisticActions: Object.create(null)
 };
 
 const bridge = {
@@ -124,6 +145,9 @@ const bridge = {
     catch (error) { console.error(`[Generic Exlantix] ${method}`, error); return null; }
   },
   runEnum(command) { return this.call("runEnum", TOKEN, command); },
+  has(method) { return this.available() && typeof window.androidApi[method] === "function"; },
+  runEnumAsync(requestId, command) { return this.call("requestRunEnumAsync", TOKEN, requestId, command) === true; },
+  requestCarDataAsync(requestId, name) { return this.call("requestCarDataAsync", TOKEN, requestId, name) === true; },
   runApp(packageName) { return this.call("runApp", TOKEN, packageName); },
   runSavedSplit(raw) { return parseJson(this.call("runSavedSplit", TOKEN, raw), null); },
   getWeather() { return parseJson(this.call("getWeather", TOKEN), null); },
@@ -148,6 +172,173 @@ function parseJson(value, fallback) {
   if (value == null) return fallback;
   if (typeof value !== "string") return value;
   try { return JSON.parse(value); } catch { return fallback; }
+}
+
+function nextRequestId(prefix) {
+  state.requestSequence = (state.requestSequence + 1) % 1_000_000;
+  return `${prefix}_${Date.now()}_${state.requestSequence}`;
+}
+
+function normalizeLevel(value) {
+  const level = Number(value);
+  return Number.isFinite(level) && level >= 0 && level <= 3 ? Math.round(level) : null;
+}
+
+function normalizeBoolean(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "on", "yes"].includes(normalized)) return true;
+    if (["false", "0", "off", "no"].includes(normalized)) return false;
+  }
+  return null;
+}
+
+function applySeatLevels(raw) {
+  const payload = parseJson(raw, raw) || {};
+  const seats = payload.seats || payload;
+  const front = seats.front || seats.frontSeats || {};
+  const rear = seats.rear || seats.rearSeats || {};
+  const frontLeft = front.frontLeft || {};
+  const frontRight = front.frontRight || {};
+  const rearLeft = rear.rearLeft || {};
+  const rearRight = rear.rearRight || {};
+  const levels = {
+    heat_seat_l: normalizeLevel(frontLeft.heat),
+    vent_seat_l: normalizeLevel(frontLeft.vent),
+    heat_seat_r: normalizeLevel(frontRight.heat),
+    vent_seat_r: normalizeLevel(frontRight.vent),
+    heat_zad_seat_l: normalizeLevel(rearLeft.heat),
+    vent_zad_seat_l: normalizeLevel(rearLeft.vent),
+    heat_zad_seat_r: normalizeLevel(rearRight.heat),
+    vent_zad_seat_r: normalizeLevel(rearRight.vent)
+  };
+
+  let changed = false;
+  const now = Date.now();
+  state.slots.forEach(slot => {
+    if (slot?.type !== "level") return;
+    const level = levels[slot.id];
+    if (level == null) return;
+    const optimistic = state.optimisticLevels[slot.id];
+    if (optimistic && now < optimistic.until && level !== optimistic.level) return;
+    if (optimistic && level === optimistic.level) delete state.optimisticLevels[slot.id];
+    if (Number(slot.level) !== level) {
+      slot.level = level;
+      changed = true;
+    }
+  });
+  if (changed) renderSlots();
+}
+
+function applyActionStates(raw) {
+  const payload = parseJson(raw, raw) || {};
+  const heat = payload.heat || payload;
+  const now = Date.now();
+  let changed = false;
+  [...new Set(Object.values(ACTION_STATE_COMMANDS).map(item => item.key))].forEach(key => {
+    const value = normalizeBoolean(heat[key]);
+    if (value == null) return;
+    const optimistic = state.optimisticActions[key];
+    if (optimistic && now < optimistic.until && value !== optimistic.value) return;
+    if (optimistic && value === optimistic.value) delete state.optimisticActions[key];
+    if (state.actionStates[key] !== value) {
+      state.actionStates[key] = value;
+      changed = true;
+    }
+  });
+  if (changed) renderSlots();
+}
+
+function applyCarState(raw) {
+  const payload = parseJson(raw, raw) || {};
+  const vehicle = payload.vehicle || payload;
+  const ready = vehicle.ready ?? vehicle.engine ?? vehicle.vehicleReady;
+  if (ready != null) document.getElementById("vehicle-status").textContent = ready ? "Готов к поездке" : "Автомобиль выключен";
+  const temperature = vehicle.outTemp ?? vehicle.outsideTemperature;
+  if (Number.isFinite(Number(temperature))) document.getElementById("outside-temperature").textContent = `${Number(temperature) > 0 ? "+" : ""}${Math.round(Number(temperature))}°`;
+  const voltage = vehicle.batteryVoltage ?? vehicle.voltage;
+  if (Number.isFinite(Number(voltage))) document.getElementById("battery-voltage").textContent = `${Number(voltage).toFixed(1)} V`;
+  applySeatLevels(payload);
+  applyActionStates(payload);
+}
+
+function clearStateRequest() {
+  clearTimeout(state.stateRequestTimer);
+  state.stateRequestTimer = null;
+  state.stateRequestPending = false;
+  state.stateRequestId = null;
+}
+
+function pollCarState() {
+  if (!bridge.has("requestCarDataAsync") || state.stateRequestPending || state.commandInFlight) return;
+  const requestId = nextRequestId("state");
+  state.stateRequestPending = true;
+  state.stateRequestId = requestId;
+  if (!bridge.requestCarDataAsync(requestId, CAR_STATE_REQUEST_NAME)) {
+    clearStateRequest();
+    return;
+  }
+  state.stateRequestTimer = setTimeout(clearStateRequest, COMMAND_WATCHDOG_MS);
+}
+
+function enqueueEnumCommand(command, label, coalesceKey = null) {
+  if (!bridge.available()) return;
+  const item = { command, label, coalesceKey, requestId: null, watchdog: null };
+  if (coalesceKey) {
+    const queuedIndex = state.commandQueue.findIndex(queued => queued.coalesceKey === coalesceKey);
+    if (queuedIndex >= 0) state.commandQueue[queuedIndex] = item;
+    else state.commandQueue.push(item);
+  } else {
+    state.commandQueue.push(item);
+  }
+  dispatchNextEnumCommand();
+}
+
+function dispatchNextEnumCommand() {
+  if (state.commandInFlight || !state.commandQueue.length) return;
+  const item = state.commandQueue.shift();
+  item.requestId = nextRequestId("enum");
+  state.commandInFlight = item;
+
+  if (bridge.has("requestRunEnumAsync")) {
+    if (!bridge.runEnumAsync(item.requestId, item.command)) {
+      finishEnumCommand(item.requestId);
+      showToast("Команда временно недоступна");
+      return;
+    }
+    item.watchdog = setTimeout(() => finishEnumCommand(item.requestId), COMMAND_WATCHDOG_MS);
+    return;
+  }
+
+  setTimeout(() => {
+    bridge.runEnum(item.command);
+    finishEnumCommand(item.requestId);
+  }, 0);
+}
+
+function finishEnumCommand(requestId, response = null) {
+  const item = state.commandInFlight;
+  if (!item || item.requestId !== requestId) return;
+  clearTimeout(item.watchdog);
+  state.commandInFlight = null;
+  if (response?.error) showToast("Команда не выполнена");
+  setTimeout(dispatchNextEnumCommand, 70);
+  setTimeout(pollCarState, 350);
+}
+
+function handleCarResponse(raw) {
+  const event = parseJson(raw, raw) || {};
+  const response = parseJson(event.response, event.response) || {};
+  if (event.requestType === "runEnum") {
+    finishEnumCommand(event.requestId, response);
+    return;
+  }
+  if (event.requestType === "data" && event.requestId === state.stateRequestId) {
+    clearStateRequest();
+    if (!response.error) applyCarState(response);
+  }
 }
 
 function loadSlots() {
@@ -252,13 +443,16 @@ function renderSlot(slot, index) {
   const isApp = slot.type === "app";
   const isCar = slot.type === "car";
   const isSplit = slot.type === "split";
+  const trackedAction = slot.type === "action" ? ACTION_STATE_COMMANDS[slot.command] : null;
+  const trackedState = trackedAction ? state.actionStates[trackedAction.key] : null;
+  if (trackedState === true) element.classList.add("state-on");
   const label = slot.label || (isApp ? slot.packageName : isSplit ? "Сохранённая комбинация" : actionLabel(slot.command));
   const iconContent = slot.icon
     ? `<img src="data:image/png;base64,${slot.icon}" alt="">`
     : (isApp ? (label.trim().charAt(0).toUpperCase() || "A") : isSplit ? "▥" : commandIcon(slot.command));
   element.innerHTML = `
     <div class="action-icon">${iconContent}</div>
-    <div class="action-main"><strong>${escapeHtml(label)}</strong><span>${isApp ? "Приложение" : isCar ? "Автомобиль" : isSplit ? `Комбинация · ${Number(slot.ratio) || 50}/${100 - (Number(slot.ratio) || 50)}` : "Действие"}</span></div>
+    <div class="action-main"><strong>${escapeHtml(label)}</strong><span>${isApp ? "Приложение" : isCar ? "Автомобиль" : isSplit ? `Комбинация · ${Number(slot.ratio) || 50}/${100 - (Number(slot.ratio) || 50)}` : trackedState == null ? "Действие" : trackedState ? "Включено" : "Выключено"}</span></div>
     <div class="single-lamp" aria-hidden="true"></div>`;
   bindSlotPress(element, index, () => executeSlot(index));
   return element;
@@ -296,9 +490,13 @@ function setLevel(index, level) {
   if (!group) return;
   const command = level === 0 ? group.off : `${group.id}_${level}`;
   slot.level = level;
+  state.optimisticLevels[group.id] = { level, until: Date.now() + 3_000 };
   saveSlots();
   renderSlots();
-  runCommand(command, group.label, document.querySelector(`[data-slot="${index}"]`));
+  const element = document.querySelector(`[data-slot="${index}"]`);
+  pulse(element);
+  showToast(bridge.available() ? group.label : `Демо: ${group.label}`);
+  enqueueEnumCommand(command, group.label, group.id);
 }
 
 function cycleLevel(index) {
@@ -329,9 +527,17 @@ function executeSlot(index) {
 }
 
 function runCommand(command, label, element) {
-  bridge.runEnum(command);
+  const trackedAction = ACTION_STATE_COMMANDS[command];
+  if (trackedAction) {
+    const slotIndex = element?.dataset.slot;
+    state.actionStates[trackedAction.key] = trackedAction.value;
+    state.optimisticActions[trackedAction.key] = { value: trackedAction.value, until: Date.now() + 3_000 };
+    renderSlots();
+    element = document.querySelector(`[data-slot="${slotIndex}"]`);
+  }
   pulse(element);
   showToast(bridge.available() ? label : `Демо: ${label}`);
+  enqueueEnumCommand(command, label);
 }
 
 function pulse(element) {
@@ -467,18 +673,6 @@ function loadHostCapabilities() {
   state.apps = Array.isArray(apps) ? apps : [];
   const splits = bridge.getSavedSplitActions();
   state.splits = Array.isArray(splits) ? splits : [];
-}
-
-function syncVehicleData() {
-  if (!bridge.available()) return;
-  const vehicle = bridge.getCarData("vehicle") || bridge.getCarData("all") || {};
-  const heat = bridge.getCarData("heat") || {};
-  const ready = vehicle.ready ?? vehicle.engine ?? vehicle.vehicleReady;
-  if (ready != null) document.getElementById("vehicle-status").textContent = ready ? "Готов к поездке" : "Автомобиль выключен";
-  const temperature = vehicle.outTemp ?? vehicle.outsideTemperature ?? heat.outTemp;
-  if (Number.isFinite(Number(temperature))) document.getElementById("outside-temperature").textContent = `${Number(temperature) > 0 ? "+" : ""}${Math.round(Number(temperature))}°`;
-  const voltage = vehicle.batteryVoltage ?? vehicle.voltage;
-  if (Number.isFinite(Number(voltage))) document.getElementById("battery-voltage").textContent = `${Number(voltage).toFixed(1)} V`;
 }
 
 function updateClock() {
@@ -636,6 +830,7 @@ function refreshWeather(manual = false) {
 }
 
 window.onAndroidEvent = function onAndroidEvent(type, data) {
+  if (type === "carResponse") handleCarResponse(data);
   if (type === "musicInfo") applyMusicInfo(data);
   if (type === "weather") applyWeather(data);
   if (type === "gps") {
@@ -647,7 +842,7 @@ window.onAndroidEvent = function onAndroidEvent(type, data) {
       if (!state.lastWeatherRequestAt) refreshWeather();
     }
   }
-  if (["vehicle", "heat", "carData", "climateState"].includes(type)) syncVehicleData();
+  if (["vehicle", "heat", "carData", "climateState"].includes(type)) pollCarState();
 };
 
 function showToast(message) {
@@ -671,8 +866,8 @@ document.addEventListener("DOMContentLoaded", () => {
   applyWeather(bridge.getWeather());
   setInterval(refreshWeather, WEATHER_REFRESH_MS);
   renderSlots();
-  syncVehicleData();
-  if (bridge.available()) setInterval(syncVehicleData, 4_000);
+  pollCarState();
+  if (bridge.available()) setInterval(pollCarState, CAR_STATE_POLL_MS);
 
   document.querySelectorAll("[data-media]").forEach(button => button.addEventListener("click", () => runCommand(button.dataset.media, "Команда плеера", button)));
   document.getElementById("settings-button").addEventListener("click", () => bridge.call("onSettings", TOKEN));
