@@ -121,6 +121,7 @@ const state = {
   apps: [],
   splits: [],
   actionIcons: Object.create(null),
+  catalogAsync: false,
   weatherLocation: null,
   lastWeatherRequestAt: 0,
   pickerSlot: null,
@@ -135,7 +136,10 @@ const state = {
   commandInFlight: null,
   optimisticLevels: Object.create(null),
   actionStates: Object.create(null),
-  optimisticActions: Object.create(null)
+  optimisticActions: Object.create(null),
+  uiRequests: Object.create(null),
+  catalogRenderPending: false,
+  pickerRenderPending: false
 };
 
 const bridge = {
@@ -149,6 +153,12 @@ const bridge = {
   has(method) { return this.available() && typeof window.androidApi[method] === "function"; },
   runEnumAsync(requestId, command) { return this.call("requestRunEnumAsync", TOKEN, requestId, command) === true; },
   requestCarDataAsync(requestId, name) { return this.call("requestCarDataAsync", TOKEN, requestId, name) === true; },
+  requestLauncherCatalogAsync(requestId) { return this.call("requestLauncherCatalogAsync", TOKEN, requestId) === true; },
+  runAppAsync(requestId, packageName) { return this.call("requestRunAppAsync", TOKEN, requestId, packageName) === true; },
+  runSavedSplitAsync(requestId, raw) { return this.call("requestRunSavedSplitAsync", TOKEN, requestId, raw) === true; },
+  carCommandAsync(requestId, command) {
+    return this.call("requestCarCommandAsync", TOKEN, requestId, JSON.stringify({ cmd: command })) === true;
+  },
   runApp(packageName) { return this.call("runApp", TOKEN, packageName); },
   runSavedSplit(raw) { return parseJson(this.call("runSavedSplit", TOKEN, raw), null); },
   getWeather() { return parseJson(this.call("getWeather", TOKEN), null); },
@@ -348,6 +358,17 @@ function handleCarResponse(raw) {
   if (event.requestType === "data" && event.requestId === state.stateRequestId) {
     clearStateRequest();
     if (!response.error) applyCarState(response);
+    return;
+  }
+  if (["runApp", "runSavedSplit", "command"].includes(event.requestType)) {
+    const pending = state.uiRequests[event.requestId];
+    delete state.uiRequests[event.requestId];
+    if (!pending || !response.error) return;
+    showToast(response.error === "split_not_found"
+      ? "Комбинация больше не сохранена"
+      : response.error === "app_not_found"
+        ? "Приложение больше не установлено"
+        : "Не удалось выполнить действие");
   }
 }
 
@@ -376,8 +397,13 @@ function normalizeActionList(raw) {
     const label = typeof item === "object" && item
       ? item.RunEnumText || item.runEnumText || item.label || item.title
       : "";
-    if (label) ACTION_LABELS[command] = String(label);
-    commands.push(String(command));
+    const normalizedCommand = String(command);
+    if (label) ACTION_LABELS[normalizedCommand] = String(label);
+    const icon = typeof item === "object" && item
+      ? item.RunEnumPic || item.runEnumPic || item.icon
+      : "";
+    if (icon) state.actionIcons[normalizedCommand] = String(icon);
+    commands.push(normalizedCommand);
   });
   return [...new Set(commands)];
 }
@@ -402,6 +428,7 @@ function imageSource(value) {
 function actionIcon(command) {
   if (!command) return "";
   if (state.actionIcons[command]) return state.actionIcons[command];
+  if (state.catalogAsync) return "";
   const icon = bridge.getRunEnumPic(command);
   if (icon) state.actionIcons[command] = icon;
   return icon;
@@ -430,8 +457,9 @@ function commandIcon(command) {
 
 function renderSlots() {
   const container = document.getElementById("action-slots");
-  container.innerHTML = "";
-  state.slots.forEach((slot, index) => container.appendChild(renderSlot(slot, index)));
+  const fragment = document.createDocumentFragment();
+  state.slots.forEach((slot, index) => fragment.appendChild(renderSlot(slot, index)));
+  container.replaceChildren(fragment);
 }
 
 function renderSlot(slot, index) {
@@ -473,7 +501,7 @@ function renderSlot(slot, index) {
   const label = slot.label || (isApp ? slot.packageName : isSplit ? "Сохранённая комбинация" : actionLabel(slot.command));
   const slotIcon = slot.icon || (slot.type === "action" ? actionIcon(slot.command) : "");
   const iconContent = slotIcon
-    ? `<img src="${imageSource(slotIcon)}" alt="">`
+    ? `<img src="${imageSource(slotIcon)}" alt="" decoding="async">`
     : (isApp ? (label.trim().charAt(0).toUpperCase() || "A") : isSplit ? "▥" : commandIcon(slot.command));
   element.innerHTML = `
     <div class="action-icon">${iconContent}</div>
@@ -533,19 +561,38 @@ function executeSlot(index) {
   const slot = state.slots[index];
   const element = document.querySelector(`[data-slot="${index}"]`);
   if (slot.type === "app") {
-    bridge.runApp(slot.packageName);
     pulse(element);
     showToast(`Открываю: ${slot.label || slot.packageName}`);
+    if (bridge.has("requestRunAppAsync")) {
+      const requestId = nextRequestId("app");
+      state.uiRequests[requestId] = { type: "app" };
+      if (!bridge.runAppAsync(requestId, slot.packageName)) {
+        delete state.uiRequests[requestId];
+        showToast("Приложение временно недоступно");
+      }
+    } else setTimeout(() => bridge.runApp(slot.packageName), 0);
   } else if (slot.type === "car") {
-    bridge.carCommand(slot.command);
     pulse(element);
     showToast(bridge.available() ? slot.label : `Демо: ${slot.label}`);
+    if (bridge.has("requestCarCommandAsync")) {
+      const requestId = nextRequestId("car");
+      state.uiRequests[requestId] = { type: "car" };
+      if (!bridge.carCommandAsync(requestId, slot.command)) {
+        delete state.uiRequests[requestId];
+        showToast("Команда временно недоступна");
+      }
+    } else setTimeout(() => bridge.carCommand(slot.command), 0);
   } else if (slot.type === "split") {
-    const result = bridge.runSavedSplit(slot.raw);
     pulse(element);
-    if (result?.error === "split_not_found") showToast("Комбинация больше не сохранена");
-    else if (result?.error) showToast("Не удалось запустить комбинацию");
-    else showToast(bridge.available() ? (slot.label || "Комбинация запущена") : `Демо: ${slot.label || "Комбинация"}`);
+    showToast(bridge.available() ? (slot.label || "Запускаю комбинацию") : `Демо: ${slot.label || "Комбинация"}`);
+    if (bridge.has("requestRunSavedSplitAsync")) {
+      const requestId = nextRequestId("split");
+      state.uiRequests[requestId] = { type: "split" };
+      if (!bridge.runSavedSplitAsync(requestId, slot.raw)) {
+        delete state.uiRequests[requestId];
+        showToast("Комбинация временно недоступна");
+      }
+    } else setTimeout(() => bridge.runSavedSplit(slot.raw), 0);
   } else if (slot.type === "action") {
     runCommand(slot.command, slot.label || actionLabel(slot.command), element);
   }
@@ -653,15 +700,27 @@ function renderPicker() {
     grid.innerHTML = `<div class="picker-empty">${emptyText}</div>`;
     return;
   }
+  const fragment = document.createDocumentFragment();
   items.forEach(item => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "picker-item";
     const itemIcon = item.icon || (item.type === "action" ? actionIcon(item.command) : "");
-    const icon = itemIcon ? `<img src="${imageSource(itemIcon)}" alt="">` : escapeHtml(item.symbol || "↗");
+    const icon = itemIcon ? `<img src="${imageSource(itemIcon)}" alt="" loading="lazy" decoding="async">` : escapeHtml(item.symbol || "↗");
     button.innerHTML = `<span class="picker-item-icon">${icon}</span><span class="picker-item-copy"><strong>${escapeHtml(item.label)}</strong><span>${escapeHtml(item.detail)}</span></span>`;
     button.addEventListener("click", () => assignPickerItem(item));
-    grid.appendChild(button);
+    fragment.appendChild(button);
+  });
+  grid.appendChild(fragment);
+}
+
+function schedulePickerRender() {
+  if (state.pickerRenderPending) return;
+  state.pickerRenderPending = true;
+  requestAnimationFrame(() => {
+    state.pickerRenderPending = false;
+    const picker = document.getElementById("picker");
+    if (picker && !picker.hidden) renderPicker();
   });
 }
 
@@ -694,11 +753,40 @@ function assignPickerItem(item) {
 }
 
 function loadHostCapabilities() {
+  if (bridge.has("requestLauncherCatalogAsync")) {
+    const requestId = nextRequestId("catalog");
+    state.catalogAsync = bridge.requestLauncherCatalogAsync(requestId);
+    if (state.catalogAsync) return;
+  }
   state.actions = normalizeActionList(bridge.getRunEnum());
   const apps = bridge.getUserApps();
   state.apps = Array.isArray(apps) ? apps : [];
   const splits = bridge.getSavedSplitActions();
   state.splits = Array.isArray(splits) ? splits : [];
+}
+
+function applyLauncherCatalog(raw) {
+  const data = parseJson(raw, raw) || {};
+  const items = Array.isArray(data.items) ? data.items : [];
+  if (data.section === "actions") {
+    const commands = normalizeActionList(items);
+    state.actions = data.append ? [...new Set([...state.actions, ...commands])] : commands;
+  } else if (data.section === "apps") {
+    state.apps = data.append ? [...state.apps, ...items] : items;
+  } else if (data.section === "splits") {
+    state.splits = data.append ? [...state.splits, ...items] : items;
+  }
+  scheduleCatalogRender();
+}
+
+function scheduleCatalogRender() {
+  if (state.catalogRenderPending) return;
+  state.catalogRenderPending = true;
+  requestAnimationFrame(() => {
+    state.catalogRenderPending = false;
+    renderSlots();
+    schedulePickerRender();
+  });
 }
 
 function updateClock() {
@@ -806,15 +894,22 @@ function applyMusicInfo(raw) {
   const data = parseJson(raw, raw) || {};
   document.getElementById("track-title").textContent = data.SongName || data.title || "Музыка не выбрана";
   document.getElementById("track-artist").textContent = data.SongArtist || data.artist || "JCarTools Media";
-  const picture = musicArtworkUrl(data.SongAlbumPicture || data.albumArt);
   const art = document.getElementById("album-art");
-  if (picture) {
-    art.style.backgroundImage = `url("${picture}")`;
-    art.classList.add("has-image");
-  } else {
-    art.style.backgroundImage = "";
-    art.classList.remove("has-image");
+  if (Object.prototype.hasOwnProperty.call(data, "SongAlbumPicture") ||
+      Object.prototype.hasOwnProperty.call(data, "albumArt")) {
+    const picture = musicArtworkUrl(data.SongAlbumPicture || data.albumArt);
+    if (picture) {
+      art.style.backgroundImage = `url("${picture}")`;
+      art.classList.add("has-image");
+    } else {
+      art.style.backgroundImage = "";
+      art.classList.remove("has-image");
+    }
   }
+}
+
+function afterFirstPaint(callback) {
+  requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(callback, 0)));
 }
 
 function weatherSymbol(condition) {
@@ -879,6 +974,7 @@ function refreshWeather(manual = false) {
 
 window.onAndroidEvent = function onAndroidEvent(type, data) {
   if (type === "carResponse") handleCarResponse(data);
+  if (type === "launcherCatalog") applyLauncherCatalog(data);
   if (type === "musicInfo") applyMusicInfo(data);
   if (type === "weather") applyWeather(data);
   if (type === "gps") {
@@ -908,13 +1004,9 @@ function escapeHtml(value) {
 document.addEventListener("DOMContentLoaded", () => {
   updateClock();
   applyWeather(localStorage.getItem(WEATHER_STORAGE_KEY), false);
-  setHeroWallpaper();
   setInterval(updateClock, 30_000);
-  loadHostCapabilities();
-  applyWeather(bridge.getWeather());
   setInterval(refreshWeather, WEATHER_REFRESH_MS);
   renderSlots();
-  pollCarState();
   if (bridge.available()) setInterval(pollCarState, CAR_STATE_POLL_MS);
 
   document.querySelectorAll("[data-media]").forEach(button => button.addEventListener("click", () => runCommand(button.dataset.media, "Команда плеера", button)));
@@ -924,7 +1016,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("weather-widget").addEventListener("click", () => refreshWeather(true));
   document.getElementById("picker-close").addEventListener("click", closePicker);
   document.getElementById("picker").addEventListener("click", event => { if (event.target.id === "picker") closePicker(); });
-  document.getElementById("picker-search").addEventListener("input", event => { state.query = event.target.value; renderPicker(); });
+  document.getElementById("picker-search").addEventListener("input", event => { state.query = event.target.value; schedulePickerRender(); });
   document.querySelectorAll("[data-picker-tab]").forEach(button => button.addEventListener("click", () => {
     state.pickerTab = button.dataset.pickerTab;
     document.querySelectorAll("[data-picker-tab]").forEach(tab => tab.classList.toggle("active", tab === button));
@@ -934,4 +1026,10 @@ document.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("contextmenu", event => event.preventDefault());
 
   bridge.call("onJsReady", TOKEN);
+  afterFirstPaint(() => {
+    setHeroWallpaper();
+    loadHostCapabilities();
+    applyWeather(bridge.getWeather());
+    pollCarState();
+  });
 });
