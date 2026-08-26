@@ -120,6 +120,7 @@ const state = {
   actions: [],
   apps: [],
   splits: [],
+  actionIcons: Object.create(null),
   weatherLocation: null,
   lastWeatherRequestAt: 0,
   pickerSlot: null,
@@ -394,6 +395,20 @@ function actionLabel(command) {
     .replace(/^./, letter => letter.toUpperCase());
 }
 
+function imageSource(value) {
+  const icon = String(value || "").replace(/\s+/g, "");
+  if (!icon) return "";
+  return /^data:image\//i.test(icon) ? icon : `data:image/png;base64,${icon}`;
+}
+
+function actionIcon(command) {
+  if (!command) return "";
+  if (state.actionIcons[command]) return state.actionIcons[command];
+  const icon = bridge.getRunEnumPic(command);
+  if (icon) state.actionIcons[command] = icon;
+  return icon;
+}
+
 function levelGroup(id) {
   return LEVEL_GROUPS.find(group => group.id === id);
 }
@@ -458,8 +473,9 @@ function renderSlot(slot, index) {
   const trackedState = trackedAction ? state.actionStates[trackedAction.key] : null;
   if (trackedState === true) element.classList.add("state-on");
   const label = slot.label || (isApp ? slot.packageName : isSplit ? "Сохранённая комбинация" : actionLabel(slot.command));
-  const iconContent = slot.icon
-    ? `<img src="data:image/png;base64,${slot.icon}" alt="">`
+  const slotIcon = slot.icon || (slot.type === "action" ? actionIcon(slot.command) : "");
+  const iconContent = slotIcon
+    ? `<img src="${imageSource(slotIcon)}" alt="">`
     : (isApp ? (label.trim().charAt(0).toUpperCase() || "A") : isSplit ? "▥" : commandIcon(slot.command));
   element.innerHTML = `
     <div class="action-icon">${iconContent}</div>
@@ -643,7 +659,8 @@ function renderPicker() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "picker-item";
-    const icon = item.icon ? `<img src="data:image/png;base64,${item.icon}" alt="">` : escapeHtml(item.symbol || "↗");
+    const itemIcon = item.icon || (item.type === "action" ? actionIcon(item.command) : "");
+    const icon = itemIcon ? `<img src="${imageSource(itemIcon)}" alt="">` : escapeHtml(item.symbol || "↗");
     button.innerHTML = `<span class="picker-item-icon">${icon}</span><span class="picker-item-copy"><strong>${escapeHtml(item.label)}</strong><span>${escapeHtml(item.detail)}</span></span>`;
     button.addEventListener("click", () => assignPickerItem(item));
     grid.appendChild(button);
@@ -670,7 +687,7 @@ function assignPickerItem(item) {
   } else if (item.type === "car") {
     state.slots[state.pickerSlot] = { type: "car", command: item.command, label: item.label };
   } else {
-    state.slots[state.pickerSlot] = { type: "action", command: item.command, label: item.label, icon: bridge.getRunEnumPic(item.command) };
+    state.slots[state.pickerSlot] = { type: "action", command: item.command, label: item.label, icon: actionIcon(item.command) };
   }
   saveSlots();
   renderSlots();
