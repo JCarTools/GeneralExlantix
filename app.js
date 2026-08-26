@@ -189,7 +189,10 @@ function nextRequestId(prefix) {
 
 function normalizeLevel(value) {
   const level = Number(value);
-  return Number.isFinite(level) && level >= 0 && level <= 3 ? Math.round(level) : null;
+  if (!Number.isFinite(level)) return null;
+  const rounded = Math.round(level);
+  if (rounded >= 1 && rounded <= 4) return rounded - 1;
+  return rounded === 0 ? 0 : null;
 }
 
 function normalizeBoolean(value) {
