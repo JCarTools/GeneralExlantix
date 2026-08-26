@@ -168,6 +168,14 @@ const bridge = {
   getCarData(key) { return parseJson(this.call("getCarData", TOKEN, key), null); }
 };
 
+window.JctInsets = function (left, top, right, bottom) {
+  const root = document.documentElement.style;
+  root.setProperty("--safe-left", `${Math.max(0, Number(left) || 0)}px`);
+  root.setProperty("--safe-top", `${Math.max(0, Number(top) || 0)}px`);
+  root.setProperty("--safe-right", `${Math.max(0, Number(right) || 0)}px`);
+  root.setProperty("--safe-bottom", `${Math.max(0, Number(bottom) || 0)}px`);
+};
+
 function parseJson(value, fallback) {
   if (value == null) return fallback;
   if (typeof value !== "string") return value;
