@@ -3,16 +3,25 @@ const SLOT_COUNT = 12;
 const STORAGE_KEY = "generic_exlantix_slots_v1";
 
 const FALLBACK_ACTIONS = [
+  "GO_TO_PP", "RUN_BLACK", "OPEN_SHTORKA", "CLOSE_SHTORKA", "VIBOR_VODITEL",
+  "GO_TO_GU", "RUN_START_APP_MENU", "GLOBAL_BACK", "GLOBAL_HOME", "TOGGLE_GU_PP",
+  "RUN_FUN_CAR", "TOGGLE_GU_PP_CPP", "GO_CPP_TO_PP", "TOGGLE_CPP_PP",
+  "MEDIA_PLAY", "MEDIA_PAUSE", "MEDIA_NEXT", "MEDIA_BLACK", "VIEW_ALL_MESSAGE",
+  "b_fiksik_on", "b_fiksik_off",
   "heat_seat_l_0", "heat_seat_l_1", "heat_seat_l_2", "heat_seat_l_3",
   "vent_seat_l_0", "vent_seat_l_1", "vent_seat_l_2", "vent_seat_l_3",
   "heat_seat_r_0", "heat_seat_r_1", "heat_seat_r_2", "heat_seat_r_3",
   "vent_seat_r_0", "vent_seat_r_1", "vent_seat_r_2", "vent_seat_r_3",
+  "heat_wheel_on", "heat_wheel_off", "heat_windshield_on", "heat_windshield_off",
+  "heat_rearwindow_on", "heat_rearwindow_off",
   "heat_zad_seat_l_0", "heat_zad_seat_l_1", "heat_zad_seat_l_2", "heat_zad_seat_l_3",
   "heat_zad_seat_r_off", "heat_zad_seat_r_1", "heat_zad_seat_r_2", "heat_zad_seat_r_3",
-  "heat_wheel_on", "heat_wheel_off", "heat_windshield_on", "heat_windshield_off",
-  "heat_rearwindow_on", "heat_rearwindow_off", "Recirculation_On", "Recirculation_Off",
-  "OPEN_SHTORKA", "CLOSE_SHTORKA", "RUN_FUN_CAR", "RUN_START_APP_MENU",
-  "GLOBAL_HOME", "GLOBAL_BACK", "GO_TO_GU", "GO_TO_PP", "VIEW_ALL_MESSAGE"
+  "voditel_seat_1", "voditel_seat_2", "voditel_seat_3", "SPLIT_RUN", "RUN_APP_MORE",
+  "RUN_SPICH_FOCUS", "Recirculation_On", "Recirculation_Off", "Volume_Down", "Volume_Up",
+  "Driver_Temp_Down", "Driver_Temp_Up", "Passenger_Temp_Down", "Passenger_Temp_Up",
+  "vent_zad_seat_l_0", "vent_zad_seat_l_1", "vent_zad_seat_l_2", "vent_zad_seat_l_3",
+  "vent_zad_seat_r_off", "vent_zad_seat_r_1", "vent_zad_seat_r_2", "vent_zad_seat_r_3",
+  "RECENT_TASK_MANAGER", "MEDIA_PLAY_PAUSE", "TOGGLE_MOCK_GPS"
 ];
 
 const LEVEL_GROUPS = [
@@ -21,7 +30,9 @@ const LEVEL_GROUPS = [
   { id: "heat_seat_r", label: "Подогрев пассажира", detail: "Переднее правое сиденье", icon: "♨", tone: "warm", off: "heat_seat_r_0" },
   { id: "vent_seat_r", label: "Вентиляция пассажира", detail: "Переднее правое сиденье", icon: "❄", tone: "cool", off: "vent_seat_r_0" },
   { id: "heat_zad_seat_l", label: "Подогрев сзади слева", detail: "Заднее левое сиденье", icon: "♨", tone: "warm", off: "heat_zad_seat_l_0" },
-  { id: "heat_zad_seat_r", label: "Подогрев сзади справа", detail: "Заднее правое сиденье", icon: "♨", tone: "warm", off: "heat_zad_seat_r_off" }
+  { id: "heat_zad_seat_r", label: "Подогрев сзади справа", detail: "Заднее правое сиденье", icon: "♨", tone: "warm", off: "heat_zad_seat_r_off" },
+  { id: "vent_zad_seat_l", label: "Вентиляция сзади слева", detail: "Заднее левое сиденье", icon: "❄", tone: "cool", off: "vent_zad_seat_l_0" },
+  { id: "vent_zad_seat_r", label: "Вентиляция сзади справа", detail: "Заднее правое сиденье", icon: "❄", tone: "cool", off: "vent_zad_seat_r_off" }
 ];
 
 const CAR_ACTIONS = [
@@ -113,7 +124,10 @@ const bridge = {
     return null;
   },
   getRunEnum() { return parseJson(this.call("getRunEnum", TOKEN), []); },
-  getRunEnumPic(command) { return this.call("getRunEnumPic", TOKEN, command) || ""; },
+  getRunEnumPic(command) {
+    const value = this.call("getRunEnumPic", TOKEN, command) || "";
+    return typeof value === "string" && !value.trim().startsWith("{") ? value : "";
+  },
   getUserApps() { return parseJson(this.call("getUserApps", TOKEN), []); },
   getCarData(key) { return parseJson(this.call("getCarData", TOKEN, key), null); }
 };
@@ -138,7 +152,19 @@ function saveSlots() {
 
 function normalizeActionList(raw) {
   const values = Array.isArray(raw) ? raw : [];
-  return [...new Set(values.map(item => typeof item === "string" ? item : item?.name || item?.cmd).filter(Boolean))];
+  const commands = [];
+  values.forEach(item => {
+    const command = typeof item === "string"
+      ? item
+      : item?.RunEnum || item?.runEnum || item?.name || item?.cmd || item?.command;
+    if (!command) return;
+    const label = typeof item === "object" && item
+      ? item.RunEnumText || item.runEnumText || item.label || item.title
+      : "";
+    if (label) ACTION_LABELS[command] = String(label);
+    commands.push(String(command));
+  });
+  return [...new Set(commands)];
 }
 
 function actionLabel(command) {
@@ -316,7 +342,6 @@ function pickerItems() {
       return { type: "level", id: group.id, label: group.label, detail: `${group.detail} · уровни 0–3`, symbol: group.icon };
     });
   const actions = available
-    .filter(command => !groupedCommands.has(command))
     .map(command => ({ type: "action", command, label: actionLabel(command), detail: command, symbol: commandIcon(command) }));
   const apps = state.apps.map(app => ({
     type: "app",
@@ -335,7 +360,12 @@ function pickerItems() {
     "OPEN_SHTORKA", "CLOSE_SHTORKA", "RUN_FUN_CAR", "RUN_START_APP_MENU",
     "OPEN_TRUNK", "OPEN_FUEL_TANK", "OPEN_GLOVE_BOX", "CLOSE_CENTRAL_LOCK"
   ]);
-  return [...levels, ...CAR_ACTIONS.slice(0, 10), ...actions.filter(item => recommendedCommands.has(item.command)).slice(0, 12), ...apps.slice(0, 6)];
+  return [
+    ...levels,
+    ...CAR_ACTIONS.slice(0, 10),
+    ...actions.filter(item => !groupedCommands.has(item.command) && recommendedCommands.has(item.command)).slice(0, 12),
+    ...apps.slice(0, 6)
+  ];
 }
 
 function renderPicker() {
