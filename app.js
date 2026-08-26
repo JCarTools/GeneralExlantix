@@ -1,7 +1,6 @@
 const TOKEN = "SECURE_TOKEN_2025";
 const SLOT_COUNT = 12;
 const STORAGE_KEY = "generic_exlantix_slots_v1";
-const SPLIT_MIGRATION_KEY = "generic_exlantix_split_slot_v1";
 
 const FALLBACK_ACTIONS = [
   "GO_TO_PP", "RUN_BLACK", "OPEN_SHTORKA", "CLOSE_SHTORKA", "VIBOR_VODITEL",
@@ -70,7 +69,6 @@ const DEFAULT_SLOTS = [
   { type: "level", id: "heat_seat_r", level: 0 },
   { type: "action", command: "heat_wheel_on", label: "Подогрев руля" },
   { type: "car", command: "open_trunk", label: "Открыть багажник" },
-  { type: "action", command: "SPLIT_RUN", label: "Разделение экрана" },
   { type: "empty" }
 ];
 
@@ -107,6 +105,7 @@ const state = {
   slots: loadSlots(),
   actions: [],
   apps: [],
+  splits: [],
   pickerSlot: null,
   pickerTab: "recommended",
   query: "",
@@ -122,6 +121,7 @@ const bridge = {
   },
   runEnum(command) { return this.call("runEnum", TOKEN, command); },
   runApp(packageName) { return this.call("runApp", TOKEN, packageName); },
+  runSavedSplit(raw) { return parseJson(this.call("runSavedSplit", TOKEN, raw), null); },
   carCommand(command) {
     const payload = JSON.stringify({ cmd: command });
     if (this.available() && typeof window.androidApi.carCommand === "function") return this.call("carCommand", TOKEN, payload);
@@ -134,6 +134,7 @@ const bridge = {
     return typeof value === "string" && !value.trim().startsWith("{") ? value : "";
   },
   getUserApps() { return parseJson(this.call("getUserApps", TOKEN), []); },
+  getSavedSplitActions() { return parseJson(this.call("getSavedSplitActions", TOKEN), []); },
   getCarData(key) { return parseJson(this.call("getCarData", TOKEN, key), null); }
 };
 
@@ -147,27 +148,10 @@ function loadSlots() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
     if (Array.isArray(saved)) {
-      const slots = Array.from({ length: SLOT_COUNT }, (_, index) => saved[index] || { type: "empty" });
-      return migrateSplitSlot(slots);
+      return Array.from({ length: SLOT_COUNT }, (_, index) => saved[index] || { type: "empty" });
     }
   } catch (error) { console.warn("Не удалось прочитать слоты", error); }
   return Array.from({ length: SLOT_COUNT }, (_, index) => DEFAULT_SLOTS[index] ? { ...DEFAULT_SLOTS[index] } : { type: "empty" });
-}
-
-function migrateSplitSlot(slots) {
-  const hasSplit = slots.some(slot => slot?.type === "action" && slot.command === "SPLIT_RUN");
-  if (hasSplit) {
-    localStorage.setItem(SPLIT_MIGRATION_KEY, "1");
-    return slots;
-  }
-  if (localStorage.getItem(SPLIT_MIGRATION_KEY) === "1") return slots;
-  const emptyIndex = slots.findIndex(slot => !slot || slot.type === "empty");
-  if (emptyIndex >= 0) {
-    slots[emptyIndex] = { type: "action", command: "SPLIT_RUN", label: "Разделение экрана" };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(slots));
-  }
-  localStorage.setItem(SPLIT_MIGRATION_KEY, "1");
-  return slots;
 }
 
 function saveSlots() {
@@ -261,13 +245,14 @@ function renderSlot(slot, index) {
 
   const isApp = slot.type === "app";
   const isCar = slot.type === "car";
-  const label = slot.label || (isApp ? slot.packageName : actionLabel(slot.command));
+  const isSplit = slot.type === "split";
+  const label = slot.label || (isApp ? slot.packageName : isSplit ? "Сохранённая комбинация" : actionLabel(slot.command));
   const iconContent = slot.icon
     ? `<img src="data:image/png;base64,${slot.icon}" alt="">`
-    : (isApp ? (label.trim().charAt(0).toUpperCase() || "A") : commandIcon(slot.command));
+    : (isApp ? (label.trim().charAt(0).toUpperCase() || "A") : isSplit ? "▥" : commandIcon(slot.command));
   element.innerHTML = `
     <div class="action-icon">${iconContent}</div>
-    <div class="action-main"><strong>${escapeHtml(label)}</strong><span>${isApp ? "Приложение" : isCar ? "Автомобиль" : "Действие"}</span></div>
+    <div class="action-main"><strong>${escapeHtml(label)}</strong><span>${isApp ? "Приложение" : isCar ? "Автомобиль" : isSplit ? `Комбинация · ${Number(slot.ratio) || 50}/${100 - (Number(slot.ratio) || 50)}` : "Действие"}</span></div>
     <div class="single-lamp" aria-hidden="true"></div>`;
   bindSlotPress(element, index, () => executeSlot(index));
   return element;
@@ -326,6 +311,12 @@ function executeSlot(index) {
     bridge.carCommand(slot.command);
     pulse(element);
     showToast(bridge.available() ? slot.label : `Демо: ${slot.label}`);
+  } else if (slot.type === "split") {
+    const result = bridge.runSavedSplit(slot.raw);
+    pulse(element);
+    if (result?.error === "split_not_found") showToast("Комбинация больше не сохранена");
+    else if (result?.error) showToast("Не удалось запустить комбинацию");
+    else showToast(bridge.available() ? (slot.label || "Комбинация запущена") : `Демо: ${slot.label || "Комбинация"}`);
   } else if (slot.type === "action") {
     runCommand(slot.command, slot.label || actionLabel(slot.command), element);
   }
@@ -376,22 +367,37 @@ function pickerItems() {
     icon: app.icon || "",
     symbol: "A"
   })).filter(app => app.packageName);
+  const splits = state.splits.map(split => {
+    const ratio = [30, 50, 70].includes(Number(split.ratio)) ? Number(split.ratio) : 50;
+    return {
+      type: "split",
+      raw: split.raw,
+      packageName: split.packageName || "",
+      packageName2: split.packageName2 || "",
+      orient: Number(split.orient) === 2 ? 2 : 1,
+      ratio,
+      label: split.label || "Сохранённая комбинация",
+      detail: `Комбинация · ${ratio}/${100 - ratio}`,
+      icon: split.icon || "",
+      symbol: "▥"
+    };
+  }).filter(split => split.raw);
 
   if (state.pickerTab === "apps") return apps;
-  if (state.pickerTab === "actions") return [...levels, ...CAR_ACTIONS, ...actions];
+  if (state.pickerTab === "splits") return splits;
+  if (state.pickerTab === "actions") return [...levels, ...splits, ...CAR_ACTIONS, ...actions];
 
   const recommendedCommands = new Set([
     "heat_wheel_on", "heat_windshield_on", "heat_rearwindow_on", "Recirculation_On",
     "OPEN_SHTORKA", "CLOSE_SHTORKA", "RUN_FUN_CAR", "RUN_START_APP_MENU",
-    "SPLIT_RUN", "RUN_APP_MORE", "TOGGLE_GU_PP", "TOGGLE_GU_PP_CPP", "TOGGLE_CPP_PP",
+    "RUN_APP_MORE", "TOGGLE_GU_PP", "TOGGLE_GU_PP_CPP", "TOGGLE_CPP_PP",
     "OPEN_TRUNK", "OPEN_FUEL_TANK", "OPEN_GLOVE_BOX", "CLOSE_CENTRAL_LOCK"
   ]);
-  const splitAction = actions.find(item => item.command === "SPLIT_RUN");
   return [
-    ...(splitAction ? [splitAction] : []),
     ...levels,
+    ...splits,
     ...CAR_ACTIONS.slice(0, 10),
-    ...actions.filter(item => item.command !== "SPLIT_RUN" && !groupedCommands.has(item.command) && recommendedCommands.has(item.command)).slice(0, 12),
+    ...actions.filter(item => !groupedCommands.has(item.command) && recommendedCommands.has(item.command)).slice(0, 12),
     ...apps.slice(0, 6)
   ];
 }
@@ -402,7 +408,12 @@ function renderPicker() {
   const grid = document.getElementById("picker-grid");
   grid.innerHTML = "";
   if (!items.length) {
-    grid.innerHTML = `<div class="picker-empty">${state.pickerTab === "apps" && !bridge.available() ? "Приложения появятся при запуске экрана в JCarTools" : "Ничего не найдено"}</div>`;
+    const emptyText = state.pickerTab === "apps" && !bridge.available()
+      ? "Приложения появятся при запуске экрана в JCarTools"
+      : state.pickerTab === "splits"
+        ? "Сохранённых комбинаций пока нет"
+        : "Ничего не найдено";
+    grid.innerHTML = `<div class="picker-empty">${emptyText}</div>`;
     return;
   }
   items.forEach(item => {
@@ -422,6 +433,17 @@ function assignPickerItem(item) {
     state.slots[state.pickerSlot] = { type: "level", id: item.id, level: 0 };
   } else if (item.type === "app") {
     state.slots[state.pickerSlot] = { type: "app", packageName: item.packageName, label: item.label, icon: item.icon || "" };
+  } else if (item.type === "split") {
+    state.slots[state.pickerSlot] = {
+      type: "split",
+      raw: item.raw,
+      packageName: item.packageName,
+      packageName2: item.packageName2,
+      orient: item.orient,
+      ratio: item.ratio,
+      label: item.label,
+      icon: item.icon || ""
+    };
   } else if (item.type === "car") {
     state.slots[state.pickerSlot] = { type: "car", command: item.command, label: item.label };
   } else {
@@ -437,6 +459,8 @@ function loadHostCapabilities() {
   state.actions = normalizeActionList(bridge.getRunEnum());
   const apps = bridge.getUserApps();
   state.apps = Array.isArray(apps) ? apps : [];
+  const splits = bridge.getSavedSplitActions();
+  state.splits = Array.isArray(splits) ? splits : [];
 }
 
 function syncVehicleData() {
