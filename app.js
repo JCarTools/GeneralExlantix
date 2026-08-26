@@ -1,6 +1,8 @@
 const TOKEN = "SECURE_TOKEN_2025";
 const SLOT_COUNT = 12;
 const STORAGE_KEY = "generic_exlantix_slots_v1";
+const WEATHER_STORAGE_KEY = "generic_exlantix_weather_v1";
+const WEATHER_REFRESH_MS = 30 * 60 * 1000;
 
 const FALLBACK_ACTIONS = [
   "GO_TO_PP", "RUN_BLACK", "OPEN_SHTORKA", "CLOSE_SHTORKA", "VIBOR_VODITEL",
@@ -106,6 +108,8 @@ const state = {
   actions: [],
   apps: [],
   splits: [],
+  weatherLocation: null,
+  lastWeatherRequestAt: 0,
   pickerSlot: null,
   pickerTab: "recommended",
   query: "",
@@ -122,6 +126,8 @@ const bridge = {
   runEnum(command) { return this.call("runEnum", TOKEN, command); },
   runApp(packageName) { return this.call("runApp", TOKEN, packageName); },
   runSavedSplit(raw) { return parseJson(this.call("runSavedSplit", TOKEN, raw), null); },
+  getWeather() { return parseJson(this.call("getWeather", TOKEN), null); },
+  refreshWeather(latitude, longitude) { return parseJson(this.call("refreshWeather", TOKEN, latitude, longitude), null); },
   carCommand(command) {
     const payload = JSON.stringify({ cmd: command });
     if (this.available() && typeof window.androidApi.carCommand === "function") return this.call("carCommand", TOKEN, payload);
@@ -569,8 +575,78 @@ function applyMusicInfo(raw) {
   }
 }
 
+function weatherSymbol(condition) {
+  const value = String(condition || "").toLocaleLowerCase("ru");
+  if (/гроз/.test(value)) return "ϟ";
+  if (/снег|метел/.test(value)) return "❄";
+  if (/дожд|лив|морос/.test(value)) return "☂";
+  if (/туман|дымк/.test(value)) return "≋";
+  if (/ясно/.test(value)) return "☀";
+  if (/облач|пасмур|прояснен/.test(value)) return "☁";
+  return "◌";
+}
+
+function applyWeather(raw, persist = true) {
+  const data = parseJson(raw, raw) || {};
+  const widget = document.getElementById("weather-widget");
+  widget.classList.remove("loading");
+  if (data.error) {
+    if (data.error !== "location_unavailable") showToast("Погода временно недоступна");
+    return false;
+  }
+  const value = String(data.temp ?? data.temperature ?? "").trim();
+  if (!value) return false;
+  const temperature = value.endsWith("°") ? value : `${value}°`;
+  const city = String(data.city || "").trim();
+  const condition = String(data.condition || "").trim();
+  document.getElementById("weather-temperature").textContent = temperature;
+  if (city && city !== "N/A") document.getElementById("weather-city").textContent = city.toLocaleUpperCase("ru");
+  if (condition) {
+    document.getElementById("weather-condition").textContent = condition;
+    document.getElementById("weather-icon").textContent = weatherSymbol(condition);
+  }
+  if (persist) localStorage.setItem(WEATHER_STORAGE_KEY, JSON.stringify({
+    temp: temperature,
+    city: city || document.getElementById("weather-city").textContent,
+    condition: condition || document.getElementById("weather-condition").textContent
+  }));
+  return true;
+}
+
+function refreshWeather(manual = false) {
+  const widget = document.getElementById("weather-widget");
+  if (!bridge.available()) {
+    if (manual) showToast("Погода обновится в JCarTools");
+    return;
+  }
+  if (!state.weatherLocation) {
+    if (manual) showToast("Ожидаю GPS от Android");
+    return;
+  }
+  widget.classList.add("loading");
+  const result = bridge.refreshWeather(state.weatherLocation.lat, state.weatherLocation.lon);
+  if (result?.error) {
+    widget.classList.remove("loading");
+    if (manual) showToast(result.error === "location_unavailable" ? "Ожидаю координаты автомобиля" : "Погода временно недоступна");
+  } else if (manual) {
+    showToast("Обновляю погоду");
+  }
+  if (result?.status === "requested") state.lastWeatherRequestAt = Date.now();
+  setTimeout(() => widget.classList.remove("loading"), 20_000);
+}
+
 window.onAndroidEvent = function onAndroidEvent(type, data) {
   if (type === "musicInfo") applyMusicInfo(data);
+  if (type === "weather") applyWeather(data);
+  if (type === "gps") {
+    const latitude = Number(data?.lat);
+    const longitude = Number(data?.lon);
+    if (Number.isFinite(latitude) && Number.isFinite(longitude) &&
+        latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180) {
+      state.weatherLocation = { lat: latitude, lon: longitude };
+      if (!state.lastWeatherRequestAt) refreshWeather();
+    }
+  }
   if (["vehicle", "heat", "carData", "climateState"].includes(type)) syncVehicleData();
 };
 
@@ -588,9 +664,12 @@ function escapeHtml(value) {
 
 document.addEventListener("DOMContentLoaded", () => {
   updateClock();
+  applyWeather(localStorage.getItem(WEATHER_STORAGE_KEY), false);
   setHeroWallpaper();
   setInterval(updateClock, 30_000);
   loadHostCapabilities();
+  applyWeather(bridge.getWeather());
+  setInterval(refreshWeather, WEATHER_REFRESH_MS);
   renderSlots();
   syncVehicleData();
   if (bridge.available()) setInterval(syncVehicleData, 4_000);
@@ -599,6 +678,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("settings-button").addEventListener("click", () => bridge.call("onSettings", TOKEN));
   document.getElementById("close-button").addEventListener("click", () => bridge.call("onClose", TOKEN));
   document.getElementById("wallpaper-button").addEventListener("click", () => setHeroWallpaper(true));
+  document.getElementById("weather-widget").addEventListener("click", () => refreshWeather(true));
   document.getElementById("picker-close").addEventListener("click", closePicker);
   document.getElementById("picker").addEventListener("click", event => { if (event.target.id === "picker") closePicker(); });
   document.getElementById("picker-search").addEventListener("input", event => { state.query = event.target.value; renderPicker(); });
