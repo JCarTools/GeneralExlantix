@@ -768,15 +768,25 @@ async function setHeroWallpaper(force = false) {
   }
 }
 
+function musicArtworkUrl(value) {
+  const picture = String(value || "").trim();
+  if (!picture) return "";
+  if (/^data:image\//i.test(picture)) return picture.replace(/\s+/g, "");
+  return `data:image/png;base64,${picture.replace(/\s+/g, "")}`;
+}
+
 function applyMusicInfo(raw) {
   const data = parseJson(raw, raw) || {};
   document.getElementById("track-title").textContent = data.SongName || data.title || "Музыка не выбрана";
   document.getElementById("track-artist").textContent = data.SongArtist || data.artist || "JCarTools Media";
-  const picture = data.SongAlbumPicture || data.albumArt;
+  const picture = musicArtworkUrl(data.SongAlbumPicture || data.albumArt);
   const art = document.getElementById("album-art");
   if (picture) {
-    art.style.backgroundImage = `url("data:image/png;base64,${picture}")`;
+    art.style.backgroundImage = `url("${picture}")`;
     art.classList.add("has-image");
+  } else {
+    art.style.backgroundImage = "";
+    art.classList.remove("has-image");
   }
 }
 
