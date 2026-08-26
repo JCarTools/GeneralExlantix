@@ -1,6 +1,7 @@
 const TOKEN = "SECURE_TOKEN_2025";
 const SLOT_COUNT = 12;
 const STORAGE_KEY = "generic_exlantix_slots_v1";
+const SPLIT_MIGRATION_KEY = "generic_exlantix_split_slot_v1";
 
 const FALLBACK_ACTIONS = [
   "GO_TO_PP", "RUN_BLACK", "OPEN_SHTORKA", "CLOSE_SHTORKA", "VIBOR_VODITEL",
@@ -145,9 +146,28 @@ function parseJson(value, fallback) {
 function loadSlots() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if (Array.isArray(saved)) return Array.from({ length: SLOT_COUNT }, (_, index) => saved[index] || { type: "empty" });
+    if (Array.isArray(saved)) {
+      const slots = Array.from({ length: SLOT_COUNT }, (_, index) => saved[index] || { type: "empty" });
+      return migrateSplitSlot(slots);
+    }
   } catch (error) { console.warn("Не удалось прочитать слоты", error); }
   return Array.from({ length: SLOT_COUNT }, (_, index) => DEFAULT_SLOTS[index] ? { ...DEFAULT_SLOTS[index] } : { type: "empty" });
+}
+
+function migrateSplitSlot(slots) {
+  const hasSplit = slots.some(slot => slot?.type === "action" && slot.command === "SPLIT_RUN");
+  if (hasSplit) {
+    localStorage.setItem(SPLIT_MIGRATION_KEY, "1");
+    return slots;
+  }
+  if (localStorage.getItem(SPLIT_MIGRATION_KEY) === "1") return slots;
+  const emptyIndex = slots.findIndex(slot => !slot || slot.type === "empty");
+  if (emptyIndex >= 0) {
+    slots[emptyIndex] = { type: "action", command: "SPLIT_RUN", label: "Разделение экрана" };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(slots));
+  }
+  localStorage.setItem(SPLIT_MIGRATION_KEY, "1");
+  return slots;
 }
 
 function saveSlots() {
@@ -366,10 +386,12 @@ function pickerItems() {
     "SPLIT_RUN", "RUN_APP_MORE", "TOGGLE_GU_PP", "TOGGLE_GU_PP_CPP", "TOGGLE_CPP_PP",
     "OPEN_TRUNK", "OPEN_FUEL_TANK", "OPEN_GLOVE_BOX", "CLOSE_CENTRAL_LOCK"
   ]);
+  const splitAction = actions.find(item => item.command === "SPLIT_RUN");
   return [
+    ...(splitAction ? [splitAction] : []),
     ...levels,
     ...CAR_ACTIONS.slice(0, 10),
-    ...actions.filter(item => !groupedCommands.has(item.command) && recommendedCommands.has(item.command)).slice(0, 12),
+    ...actions.filter(item => item.command !== "SPLIT_RUN" && !groupedCommands.has(item.command) && recommendedCommands.has(item.command)).slice(0, 12),
     ...apps.slice(0, 6)
   ];
 }
