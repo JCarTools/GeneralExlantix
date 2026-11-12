@@ -1,4 +1,5 @@
 const TOKEN = "SECURE_TOKEN_2025";
+const player = { packageName: "", position: 0, duration: 0, playing: false, track: "", scrubTrack: null };
 const SLOT_COUNT = 12;
 const STORAGE_KEY = "generic_exlantix_slots_v1";
 const WEATHER_STORAGE_KEY = "generic_exlantix_weather_v1";
@@ -775,6 +776,13 @@ function applyLauncherCatalog(raw) {
     state.apps = data.append ? [...state.apps, ...items] : items;
   } else if (data.section === "splits") {
     state.splits = data.append ? [...state.splits, ...items] : items;
+  } else if (data.section === "actionIcons") {
+    normalizeActionList(items);
+  } else if (data.section === "appIcons") {
+    const icons = new Map(items.map(item => [item.package, item.icon || ""]));
+    state.apps = state.apps.map(app => icons.has(app.package)
+      ? { ...app, icon: icons.get(app.package) }
+      : app);
   }
   scheduleCatalogRender();
 }
@@ -890,11 +898,27 @@ function musicArtworkUrl(value) {
   return `data:image/png;base64,${picture.replace(/\s+/g, "")}`;
 }
 
+function formatTrackTime(ms) {
+  const seconds = Math.floor(ms / 1000);
+  return Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0");
+}
+
+function renderTrackPosition(position) {
+  const seek = document.getElementById("track-seek");
+  const clamped = Math.min(player.duration, Math.max(0, position));
+  seek.max = String(player.duration || 1);
+  seek.value = String(clamped);
+  document.getElementById("track-time").textContent =
+    formatTrackTime(clamped) + " / " + formatTrackTime(player.duration);
+}
+
 function applyMusicInfo(raw) {
   const data = parseJson(raw, raw) || {};
   document.getElementById("track-title").textContent = data.SongName || data.title || "Музыка не выбрана";
   document.getElementById("track-artist").textContent = data.SongArtist || data.artist || "JCarTools Media";
   const art = document.getElementById("album-art");
+  player.packageName = typeof data.packageName === "string" ? data.packageName.trim() : "";
+  art.disabled = !player.packageName || !bridge.has("runApp");
   if (Object.prototype.hasOwnProperty.call(data, "SongAlbumPicture") ||
       Object.prototype.hasOwnProperty.call(data, "albumArt")) {
     const picture = musicArtworkUrl(data.SongAlbumPicture || data.albumArt);
@@ -906,6 +930,50 @@ function applyMusicInfo(raw) {
       art.classList.remove("has-image");
     }
   }
+  const position = Number(data.Trpos), duration = Number(data.Trdur);
+  player.position = Number.isFinite(position) ? Math.max(0, Math.round(position)) : 0;
+  player.duration = Number.isFinite(duration) ? Math.max(0, Math.round(duration)) : 0;
+  player.track = JSON.stringify([player.packageName, data.SongName || data.title,
+    data.SongArtist || data.artist, data.SongAlbum, player.duration]);
+  document.getElementById("track-seek").disabled = !player.duration || !bridge.has("seekMusic");
+  if (player.scrubTrack === null) renderTrackPosition(player.position);
+
+  player.playing = data.PlayStat === "PLAY";
+  const toggle = document.getElementById("player-toggle");
+  toggle.textContent = player.playing ? "Ⅱ" : "▶";
+  toggle.setAttribute("aria-label", player.playing ? "Пауза" : "Воспроизвести");
+}
+
+function bindMusicControls() {
+  document.getElementById("album-art").addEventListener("click", () => {
+    if (player.packageName) bridge.runApp(player.packageName);
+  });
+  document.getElementById("player-toggle").addEventListener("click", () => {
+    const result = parseJson(bridge.runEnum("MEDIA_PLAY_PAUSE"), null);
+    if (result && result.error === "unknown_enum") {
+      bridge.runEnum(player.playing ? "MEDIA_PAUSE" : "MEDIA_PLAY");
+    }
+  });
+
+  const seek = document.getElementById("track-seek");
+  seek.addEventListener("input", () => {
+    if (player.scrubTrack === null) player.scrubTrack = player.track;
+    renderTrackPosition(Number(seek.value));
+  });
+  seek.addEventListener("change", () => {
+    const position = Number(seek.value);
+    if (!seek.disabled && Number.isFinite(position)
+        && (player.scrubTrack === null || player.scrubTrack === player.track)
+        && bridge.call("seekMusic", TOKEN, Math.round(position)) === true) {
+      player.position = position;
+    }
+    player.scrubTrack = null;
+    renderTrackPosition(player.position);
+  });
+  seek.addEventListener("pointercancel", () => {
+    player.scrubTrack = null;
+    renderTrackPosition(player.position);
+  });
 }
 
 function afterFirstPaint(callback) {
@@ -1010,6 +1078,7 @@ document.addEventListener("DOMContentLoaded", () => {
   if (bridge.available()) setInterval(pollCarState, CAR_STATE_POLL_MS);
 
   document.querySelectorAll("[data-media]").forEach(button => button.addEventListener("click", () => runCommand(button.dataset.media, "Команда плеера", button)));
+  bindMusicControls();
   document.getElementById("settings-button").addEventListener("click", () => bridge.call("onSettings", TOKEN));
   document.getElementById("close-button").addEventListener("click", () => bridge.call("onClose", TOKEN));
   document.getElementById("wallpaper-button").addEventListener("click", () => setHeroWallpaper(true));

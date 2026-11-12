@@ -59,9 +59,14 @@ button { color: inherit; }
 .album-art span { font-size: 33px; font-weight: 850; }
 .album-art.has-image { background-size: cover; background-position: center; }
 .album-art.has-image span { display: none; }
+.album-art { border: 0; padding: 0; }
+.album-art:not(:disabled) { cursor: pointer; }
 .track-info { min-width: 0; flex: 1; }
 .track-title { display: block; margin-top: 11px; font-size: 29px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .track-artist { display: block; margin-top: 6px; color: var(--muted); font-size: 21px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.track-progress { display: grid; gap: 1px; margin-top: 4px; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.track-progress input { width: 100%; min-width: 0; height: 28px; margin: 0; accent-color: var(--accent); touch-action: none; }
+.track-progress input:not(:disabled) { cursor: pointer; }
 .player-controls { display: flex; align-items: center; gap: 8px; }
 .player-controls button { width: 69px; height: 69px; border: 0; border-radius: 50%; background: transparent; font-size: 41px; cursor: pointer; }
 .player-controls button:active { background: var(--surface-soft); transform: scale(.94); }
